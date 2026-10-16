@@ -997,7 +997,7 @@
 
 
         // ====== KONEKSI GOOGLE SHEETS (Apps Script) ======
-        const API_URL = 'https://script.google.com/macros/s/AKfycbzQDwqLGAVHbaFCX58K44QpiKsbjt_z1IZ_LyNpX4tVyc9axb3m_BjIU_0P623NGeEt/exec';
+        const API_URL = 'https://script.google.com/macros/s/AKfycbyTrsE6zAi8k4CpE_AnSH7RHDXusvIT3qzp3it4d2qjaYFQiljFXw726U80ySL_hwUA_A/exec';
         async function api(action, payload = {}) {
             if (API_URL.startsWith('PASTE')) throw new Error('API_URL belum diisi');
             const auth = state.currentUser ? { username: state.currentUser.username, token: state.currentUser.token } : null;
@@ -1024,8 +1024,52 @@
             localStorage.setItem('ketemu_user', JSON.stringify(user));
             await loadData();
             populateDropdownOptions(); updateTopUserPill(); renderNavigation();
-            showCustomModal('Login Berhasil', `Selamat datang, ${user.fullname}!`);
+            const scanning = !!sessionStorage.getItem('ketemu_scan');
+            if (!scanning) showCustomModal('Login Berhasil', `Selamat datang, ${user.fullname}!`);
             navigateTo(user.role === 'admin' ? 'admin-dashboard' : 'user-dashboard');
+            checkScanLink();
+        }
+
+        // ====== UPLOAD FOTO ======
+        function compressImage(file, max = 800) {
+            return new Promise((resolve, reject) => {
+                const img = new Image(), url = URL.createObjectURL(file);
+                img.onload = () => {
+                    const r = Math.min(1, max / Math.max(img.width, img.height));
+                    const c = document.createElement('canvas');
+                    c.width = Math.round(img.width * r); c.height = Math.round(img.height * r);
+                    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+                    URL.revokeObjectURL(url);
+                    resolve(c.toDataURL('image/jpeg', 0.75));
+                };
+                img.onerror = () => reject(new Error('File bukan gambar yang valid.'));
+                img.src = url;
+            });
+        }
+        async function uploadPhoto(file) {
+            const dataUrl = await compressImage(file);
+            if (API_URL.startsWith('PASTE')) return dataUrl; // mode demo: simpan di memori saja
+            const r = await api('upload', { data: dataUrl.split(',')[1], name: 'foto-' + Date.now() + '.jpg' });
+            if (!r.ok) throw new Error(r.error);
+            return r.url;
+        }
+
+        // ====== BARCODE LOKASI ======
+        const SITE_URL = 'https://nurrahmaniyah43-sudo.github.io/ketemu.in/';
+        const scanUrl = loc => `${SITE_URL}?lokasi=${encodeURIComponent(loc.id)}`;
+        // Dipanggil saat halaman dibuka: jika dari scan QR, buka form lapor dengan lokasi terisi
+        function checkScanLink() {
+            const p = new URLSearchParams(location.search).get('lokasi');
+            if (p) {
+                sessionStorage.setItem('ketemu_scan', p);
+                history.replaceState(null, '', location.pathname);
+            }
+            const pending = sessionStorage.getItem('ketemu_scan');
+            if (!pending) return;
+            const loc = state.locations.find(l => l.id === pending || l.name === pending);
+            if (!loc) { sessionStorage.removeItem('ketemu_scan'); return; }
+            if (state.currentUser) sessionStorage.removeItem('ketemu_scan'); // belum login: simpan, buka lagi setelah login
+            openLaporFormModal('Ditemukan', loc.name);
         }
 
         // Navigation Structure definition according to requirement
@@ -1062,6 +1106,7 @@
             updateTopUserPill();
             const u = state.currentUser;
             navigateTo(u ? (u.role === 'admin' ? 'admin-dashboard' : 'user-dashboard') : 'beranda');
+            checkScanLink();
         });
 
         // Navigation Switcher Logic
@@ -1367,8 +1412,22 @@
             document.getElementById('modal-lapor-form').classList.add('hidden');
         }
 
-        function handleSubmitReportForm(e) {
+        async function handleSubmitReportForm(e) {
             e.preventDefault();
+            const form = e.target;
+            const btn = form.querySelector('button[type="submit"]');
+            let photo = 'https://images.unsplash.com/photo-1544816155-12df9643f363?auto=format&fit=crop&w=500&q=80';
+            const file = document.getElementById('form-item-photo').files[0];
+            if (file) {
+                const label = btn ? btn.innerText : '';
+                if (btn) { btn.disabled = true; btn.innerText = 'Mengunggah foto...'; }
+                try { photo = await uploadPhoto(file); }
+                catch (err) {
+                    if (btn) { btn.disabled = false; btn.innerText = label; }
+                    return showCustomModal('Foto Gagal Diunggah', err.message);
+                }
+                if (btn) { btn.disabled = false; btn.innerText = label; }
+            }
             const type = document.getElementById('form-item-type').value;
             const name = document.getElementById('form-item-name').value;
             const category = document.getElementById('form-item-category').value;
@@ -1387,7 +1446,7 @@
                 status: type === 'Hilang' ? 'Belum Ditemukan' : 'Ditemukan',
                 reporter: state.currentUser.fullname,
                 phone: state.currentUser.phone,
-                photo: 'https://images.unsplash.com/photo-1544816155-12df9643f363?auto=format&fit=crop&w=500&q=80'
+                photo: photo
             };
 
             newItem.owner = state.currentUser.username;
@@ -1405,7 +1464,7 @@
 
             bg('save', { table: 'notifications', row: state.notifications[0] });
             closeLaporFormModal();
-            e.target.reset();
+            form.reset();
 
             showCustomModal('Laporan Berhasil!', `Laporan barang ${type} Anda telah tersimpan. Pengguna lain dan AI dapat menemukan laporan ini.`);
 
@@ -1788,7 +1847,7 @@
                     if (elem) {
                         elem.innerHTML = '';
                         new QRCode(elem, {
-                            text: `https://nurrahmaniyah43-sudo.github.io/ketemu.in/?location=${encodeURIComponent(loc.name)}`,
+                            text: scanUrl(loc),
                             width: 120,
                             height: 120
                         });
@@ -1835,7 +1894,7 @@
             const target = document.getElementById('print-qr-target');
             target.innerHTML = '';
             new QRCode(target, {
-                text: `https://ketemu.in/scan?location=${encodeURIComponent(loc.name)}`,
+                text: scanUrl(loc),
                 width: 200,
                 height: 200
             });
@@ -1862,9 +1921,24 @@
                         <button onclick="toggleUserRoleAdmin('${u.username}')" class="text-xs text-blue-400 hover:underline">
                             ${u.role === 'admin' ? 'Jadikan User' : 'Jadikan Admin'}
                         </button>
+                        ${state.currentUser && u.username === state.currentUser.username
+                            ? '<span class="text-[10px] text-slate-500 ml-3">(akun Anda)</span>'
+                            : `<button onclick="deleteUserAdmin('${u.username}')" class="text-xs text-red-400 hover:underline ml-3">Hapus</button>`}
                     </td>
                 </tr>
             `).join('');
+        }
+
+        function deleteUserAdmin(username) {
+            if (state.currentUser && username === state.currentUser.username) {
+                showCustomModal('Tidak Bisa Dihapus', 'Anda tidak bisa menghapus akun yang sedang dipakai.');
+                return;
+            }
+            if (!confirm(`Hapus pengguna "${username}"? Akunnya tidak bisa login lagi. Laporan yang sudah dibuat tetap ada.`)) return;
+            state.users = state.users.filter(u => u.username !== username);
+            bg('remove', { table: 'users', key: username });
+            renderAdminUsersTable();
+            showCustomModal('Pengguna Dihapus', `Akun ${username} telah dihapus.`);
         }
 
         function toggleUserRoleAdmin(username) {
